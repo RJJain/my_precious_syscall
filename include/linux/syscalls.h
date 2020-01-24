@@ -1315,4 +1315,6 @@ static inline unsigned int ksys_personality(unsigned int personality)
 	return old;
 }
 
+asmlinkage long my_precious(void);
+
 #endif
