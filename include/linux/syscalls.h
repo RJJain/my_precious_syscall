@@ -1315,6 +1315,6 @@ static inline unsigned int ksys_personality(unsigned int personality)
 	return old;
 }
 
-asmlinkage long my_precious(void);
+asmlinkage long sys_my_precious(bool);
 
 #endif
