@@ -33,13 +33,16 @@ SYSCALL_DEFINE1(my_precious, bool, x ) {
 // Utility functions
 //--------------------------------------------------------------
 void obtain_pte(struct mm_struct *mm, unsigned long addr, pte_t **pte) {
+  //int ret = -EFAULT;
   pgd_t *pgd;
   p4d_t *p4d;
   pud_t *pud;
   pmd_t *pmd;
 
-  if (!down_read_trylock(&mm->mmap_sem))
+  if (!down_read_trylock(&mm->mmap_sem)) {
+    //return -EFAULT;
     return;
+  }
   pgd = pgd_offset(mm, addr);
   if( !pgd_none(*pgd)) {
     p4d = p4d_offset(pgd,addr);
@@ -54,52 +57,25 @@ void obtain_pte(struct mm_struct *mm, unsigned long addr, pte_t **pte) {
     }
   }
   up_read(&mm->mmap_sem);
+  //return 0;
   return;
 }
 
-/*
-pte_t* update_pte(struct mm_struct *mm, unsigned long addr, pte_t *newPte) {
-  pgd_t *pgd;
-  p4d_t *p4d;
-  pud_t *pud;
-  pmd_t *pmd;
-  pte_t *src_pte = 0;
-
+int update_pte( struct mm_struct *mm,
+		unsigned long addr,
+		pte_t *psrc_pte,
+		pte_t new_pte) {
   if (!down_read_trylock(&mm->mmap_sem))
-    return src_pte;
-
-  pgd = pgd_offset(mm, addr);
-  if( !pgd_none(*pgd)) {
-    p4d = p4d_offset(pgd,addr);
-    if(!p4d_none(*p4d)) {
-      pud = pud_offset(p4d, addr);
-      if(!pud_none(*pud)) {
-	pmd = pmd_offset(pud, addr);
-	if(!pmd_none(*pmd)) {
-	  src_pte = pte_offset_map(pmd, addr);
-	  // check for the src_pte
-	  // if pte does not exists but we are passing a non-zero PTE
-	  // then add this new PTE
-	  if( !pte_none(*src_pte) ) {
-	    if(pte_none(*newPte)) {
-	      set_pte(src_pte, *newPte);
-	    } else {
-	      set_pte(src_pte, (pte_t){ .pte = 0 });
-	    }
-	  } else {
-	    // xxx_rajat Need to trace this scenario
-	    if(!(*newPte)) {
-	      set_pte(src_pte, *newPte);
-	    }
-	  }
-	}
-      }
-    }
+    return -EFAULT;
+  
+  if(!pte_none(new_pte)) {
+    set_pte(psrc_pte, newPte);
+  } else {
+    set_pte(psrc_pte, (pte_t){ .pte = 0 });
   }
   up_read(&mm->mmap_sem);
-  return src_pte;
+  return 0;
 }
-*/
 
 /*--------------------------------------------------------------
   - checkpoint function
@@ -138,7 +114,7 @@ long checkpoint(void) {
       num_of_pages_per_vma = (vma_end - vma_start)/4096;
       
       save_old_pte = kmalloc_array(num_of_pages_per_vma, sizeof(pte_t), GFP_USER);
-      // Free the memory at the exit for the process
+      // xxx_rajat Free the memory at the exit for the process
       if (!save_old_pte)
 	return -ENOMEM;
       // Pointing vma_area's old_ptes to the allocated memory to save the old PTEs
@@ -218,7 +194,6 @@ long checkpoint(void) {
 --------------------------------------------------------------*/
 long restore(void) {
 
-  /*
   struct task_struct *taskPtr = NULL;
   struct mm_struct *mmPtr = NULL;
   struct vm_area_struct *vmaPtr = NULL;
@@ -239,9 +214,9 @@ long restore(void) {
   while( vmaPtr ) {
 
     if( !vmaPtr->old_ptes ) {
-      // No checkpointing done for this vma
+      // No checkpointing been done for this vma
 
-      // Fetching next vma_area
+      // Fetch the next vma_area
       vmaPtr = vmaPtr->vm_next;
       continue;
     }
@@ -257,72 +232,75 @@ long restore(void) {
 
       num_of_pages_per_vma = (vma_end - vma_start)/4096;
 
-      // Old physical frame references are saved in each vma_area old_ptes array for restoration
+      // Old physical frame references are saved in each vma_area's old_ptes array for restoration
       for( i=0; i<num_of_pages_per_vma; i++ ) {
 
 	virtualAddr = vma_start + i * 4096;
 	obtain_pte(vmaPtr->vm_mm, virtualAddr, &present_pte);
 
 	if( pte_none(vmaPtr->old_ptes[i]) ) {
+	  // Case 1 : PTE did not existed at time of checkpointing --------------------
+	  
 	  // If earlier at time of checkpointing the Page frame was not allocated then release the new
-	  // page frame and delete the PTE as well
+	  // page frame and delete the present PTE as well
 	  // Remember to flush the TLB entry as well
 	  if( present_pte != NULL && !pte_none(*present_pte) ) { // PTE exists for the address
-	    if( pte_present(*present_pte) ) {
-	      // Current page frame in memory
 	      page = pte_page(*present_pte);
 
 	      // release the page
 	      page_mapcount_reset( page );
+	      page_remove_rmap(page, false);
 	      put_page( page );
 	      
 	      // delete the pte
-	      update_pte(vmaPtr->vm_mm, virtualAddr, ); //xxx_rajat handle it
+	      pte_clear(vmaPtr->vm_mm, virtualAddr, present_pte);
+	      //int ret = update_pte(vmaPtr->vm_mm, virtualAddr, present_pte, vmaPtr->old_ptes[i] );
+	      //if( ret != 0) {
+		// Error condition
+		// handle it xxx_rajat
+	      //}
 	    
 	      flush_cache_page(vmaPtr, virtualAddr, pte_pfn(*present_pte));
 	      flush_tlb_page(vmaPtr, virtualAddr);
-
-	    } else {
-	      // Current page frame on swap
-	      // xxx_rajat : release the swap page
-
-	    }
 	  } else {
 	    // PTE does not exist
 	    // do nothing for this page
 	    continue;
 	  }
 	} else {
-	  // --- PTE existed at time of checkpointing --------------------
+	  // Case 2 : PTE existed at time of checkpointing --------------------
 	  // release the new page frame if different from older page frame
-	  if( pte_none(*present_pte) ) {
+	  if( present_pte == NULL ) {
 	    // restore the old page frame and old PTE
-	    update_pte(vmaPtr->vm_mm, virtualAddr, &vmaPtr->old_ptes[i]);
+	    update_pte(vmaPtr->vm_mm, virtualAddr, present_pte, vmaPtr->old_ptes[i]);
 	  } else {
-	    // PTE for the new frame exists
-	    page = pte_page(*present_pte);
-	    old_page = pte_page(vmaPtr->old_ptes[i]);
+	    if( pte_none(*present_pte) ) { // PTE does not exist for the address
+	      // restore the old page frame and old PTE
+	      update_pte(vmaPtr->vm_mm, virtualAddr, present_pte, vmaPtr->old_ptes[i]);
+	    } else {
+	      page = pte_page(*present_pte);
+	      old_page = pte_page(vmaPtr->old_ptes[i]);
 
-	    unsigned long pfn = pte_pfn(*present_pte);
-	    unsigned long old_pfn = pte_pfn( vmaPtr->old_ptes[i]);
+	      unsigned long pfn = pte_pfn(*present_pte);
+	      unsigned long old_pfn = pte_pfn( vmaPtr->old_ptes[i]);
 
-	    if( pfn != old_pfn ) {
-	      // release the new page frame
-	      // release the page
-	      page_mapcount_reset( page );
-	      put_page( page );
+	      if( pfn != old_pfn ) {
+		// New page frame is different from old page frame
+		// release the new page frame
+		page_mapcount_reset( page );
+		put_page( page );
 
-	      // restore the old PTE
-	      update_pte(vmaPtr->vm_mm, virtualAddr, &vmaPtr->old_ptes[i]);
+		// restore the old PTE
+		update_pte(vmaPtr->vm_mm, virtualAddr, present_pte, &vmaPtr->old_ptes[i]);
 	    
-	      flush_cache_page(vmaPtr, virtualAddr, pfn );
-	      flush_tlb_page(vmaPtr, virtualAddr);
+		flush_cache_page(vmaPtr, virtualAddr, pfn );
+		flush_tlb_page(vmaPtr, virtualAddr);
+	      }
 	    }
 	  }
-	}
-      } // for loop ended
-    } // processing for a vma area ended
-    
+	} // for loop ended
+      } // processing of a vma area ended
+    }
     // Fetching next vma_area
     vmaPtr = vmaPtr->vm_next;
   }
@@ -330,7 +308,6 @@ long restore(void) {
   if(!isCheckpointed) {
     return -EINVAL;
   }
-  */
   // Restoration successful
   return 0;
 }
